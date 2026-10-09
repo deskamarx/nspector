@@ -1,61 +1,87 @@
 # NSpector
 
-Device inventory inspector. Finds duplicate IMEIs, tracks returns, and assigns
-an owner and status to every finding so nothing sits unclaimed.
+Device inventory intelligence. Diagnoses why serials and units go missing,
+quantifies the exposure, and assigns an owner to every finding so nothing sits
+unclaimed.
 
-Built for a device distribution business where units were going missing and
-nobody could say why. It reads the existing Google Sheets data, does the
-reconciliation a spreadsheet cannot, and reports what needs attention.
-
-**Windows app** · **Android app** · **live sync between them** · **self-hosted server**
+Windows app · Android app · live sync · self-hosted server
 
 ---
 
-## What it finds
+## It reasons, it doesn't just list
 
-Loaded from your sheets (66,028 dispatch records, 6,095 deposits, 49 returns):
+Every finding carries a **diagnosis**, the **evidence** behind it, a
+**confidence** level, and **steps to take**. Severity is computed from weighted
+factors, not assigned by hand, so it moves when the data moves.
+
+### The check that changes the conclusion
+
+Every 15-digit serial is run through the standard **Luhn check digit**.
+
+On the loaded data, **zero of 57,354 failed**. That is not a null result — it
+rules out cloned and corrupted serials, which means the duplicates are a
+*process* failure, not a data-entry or counterfeiting one. You can stop
+worrying about the wrong cause.
+
+### Root cause of a duplicate comes from the gap
+
+| Gap between dispatches | Diagnosis |
+|---|---|
+| Same day | Data entry / duplicate invoice |
+| 1–30 days | Returned unit re-sold, original line never closed |
+| 31–90 days | Slow return or late record entry |
+| 90+ days | Historical backlog |
+
+On the reference dataset, **398 of 501 duplicates resolve to unclosed returns,
+not theft**.
+
+### Detectors
 
 | | |
 |---|---|
-| Duplicate serials in 2+ dealers | **501** |
-| Serials in 3 or more dealers | 23 |
+| Duplicate serials in 2+ dealers | 501 |
+| Serial in 3+ dealers | 23 |
 | IMEI lock / mismatch returns | 14 |
-| Returns with no serial — untraceable | 1 |
-| Dealer names for what is a much smaller roster | 396 |
-| Product families after collapsing SKU spelling variants | 79 |
+| Returned, never dispatched | 5 |
+| Return with no serial | 1 |
+| TAC prefix recorded against several models | 31 |
+| Serials failing the check digit | 0 |
+| Repeated dealer-to-dealer flows | 45 |
 
-It separates the duplicate types that matter:
+### Value at risk
 
-- **Same dealer twice** — a double-scan. Harmless, but it inflates your counts.
-- **Two different dealers** — a handset cannot be in two shops. This is the
-  real exposure and it is what the app queues for verification.
-- **Three or more dealers** — worst case.
-
-It also collapses your SKU spelling variants into real product families, so
-`Redmi Note 17 8/256 - Purple` and `- Black` are counted as one model rather
-than as separate products with fake risk scores.
+**Tk 1.54 Cr** across 552 findings, priced from prices actually observed on the
+returns log. Models with no observed price are reported as *unpriced* rather
+than silently counted as zero.
 
 ---
 
 ## Ownership, not accusation
 
-Every finding is a reporting item. Each one gets an **owner** and a **status**:
+Each finding is a reporting item with an **owner** and a status:
 
-| Status | Meaning |
+`open` → `investigating` → `resolved` / `dismissed`
+
+The Ownership tab shows per-person progress and unassigned value. It answers
+"who is responsible for closing this" without implying anyone did anything
+wrong — because a duplicate is almost always an unclosed return.
+
+Where a dealer shows no matched payment the app says to check name aliases
+first: in this data that is nearly always a naming problem, not a collection
+problem, and the largest accounts would be the ones wrongly accused.
+
+---
+
+## Screens
+
+| Screen | |
 |---|---|
-| `open` | Not looked at yet |
-| `investigating` | Someone is checking it |
-| `resolved` | Action taken, note recorded |
-| `dismissed` | Checked, not an issue |
-
-The Ownership tab shows per-person progress and how much value is sitting
-unassigned. It answers "who is responsible for closing this" without implying
-anyone did anything wrong — a duplicate is usually a data-entry issue, not
-theft.
-
-The app will not accuse anyone. When a dealer shows no matched payment it says
-to check name aliases first, because in this data that is almost always a
-naming problem rather than a collection problem.
+| **Work Queue** | Every finding with diagnosis, confidence, score, value. Filter by status, severity, type, owner, minimum value. |
+| **Inspector** | Any serial → chain of custody, reasoning, evidence, action list |
+| **Exposure** | Where the value sits, by severity and by root cause |
+| **Flows** | Repeated dealer-to-dealer movements, grouped as one issue |
+| **Dealers** | Duplicate rate as a percentage of each dealer's own stock |
+| **Ownership** | Who owes a resolution |
 
 ---
 
@@ -150,13 +176,15 @@ first — the app will not attempt to authenticate as you.
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/stats` | Headline numbers |
-| `GET /api/overview` | Charts: COD trend, families, dealer exposure |
-| `GET /api/findings` | The work queue, filterable by status/kind/owner |
+| `GET /api/findings` | The work queue — filter by status, severity, kind, owner, minValue |
 | `PATCH /api/findings/:id` | Set status, owner, resolution |
 | `GET /api/ownership` | Per-person rollup, unassigned total |
+| `GET /api/portfolio` | Exposure by severity and root cause, plus the price book |
+| `GET /api/chains` | Repeated dealer-to-dealer flows |
+| `GET /api/inspect/:serial` | Full reasoning dossier for one serial |
 | `GET /api/duplicates` | Duplicate serials, filterable by dealer |
-| `GET /api/imei/:serial` | Full dispatch trail for one serial |
-| `GET /api/dealers` | Dealer list with aliases |
+| `GET /api/imei/:serial` | Dispatch trail for one serial |
+| `GET /api/dealers` | Dealer list with aliases and duplicate rate |
 | `GET /api/risk` | Model families ranked by risk |
 | `GET /api/returns` | Return log |
 | `POST /api/sync` | Re-ingest and broadcast |
@@ -167,13 +195,14 @@ first — the app will not attempt to authenticate as you.
 ## Architecture
 
 ```
-server/core.js    shared normalisation + analysis (also runs in the browser)
-server/db.js      SQLite schema, ingest, finding generation
-server/sync.js    sheet fetch + re-ingest + broadcast
-server/server.js  REST API + WebSocket
-web/              single-page UI, served to every client
-electron/         Windows shell (runs the API in-process)
-android/          Android WebView shell
+server/core.js     shared SKU + serial normalisation (also runs in the browser)
+server/reason.js   inference engine — Luhn, TAC, root cause, scoring, chains
+server/db.js       SQLite schema, migrations, ingest, finding generation
+server/sync.js     sheet fetch + re-ingest + broadcast
+server/server.js   REST API + WebSocket
+web/               single-page UI, served to every client
+electron/          Windows shell (runs the API in-process)
+android/           Android WebView shell
 ```
 
 One codebase, one API. The desktop and phone render the same UI from the same
@@ -182,6 +211,15 @@ server, which is why they stay in sync without any sync code.
 Native modules are rebuilt for Electron's ABI during packaging
 (`electron-rebuild`), so `better-sqlite3` loads in both development and the
 packaged app.
+
+Schema changes use additive migrations, so owner and status work already
+recorded against findings survives an upgrade.
+
+### Why the Android APK rarely changes
+
+The phone app is a WebView shell. The UI ships from the server, so a UI change
+is pushed to every connected device with no rebuild. The APK only changes when
+the shell itself does.
 
 ### Android build note
 
