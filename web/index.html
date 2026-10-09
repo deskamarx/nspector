@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0f14">
+<title>NSpector — Device Inventory</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <div class="brand">
+      <span class="logo">NS</span>
+      <div class="brandtext">
+        <strong>NSpector</strong>
+        <small id="syncstate">connecting…</small>
+      </div>
+    </div>
+    <button id="syncbtn" class="ghost" title="Pull latest data">Sync</button>
+  </header>
+
+  <nav id="tabs">
+    <button data-tab="queue" class="active">Work Queue</button>
+    <button data-tab="overview">Overview</button>
+    <button data-tab="duplicates">Duplicates</button>
+    <button data-tab="dealers">Dealers</button>
+    <button data-tab="risk">Risk</button>
+    <button data-tab="ownership">Ownership</button>
+  </nav>
+
+  <main>
+    <!-- WORK QUEUE -->
+    <section id="queue" class="view active">
+      <div class="filters">
+        <select id="fq-status">
+          <option value="">All statuses</option>
+          <option value="open">Open</option>
+          <option value="investigating">Investigating</option>
+          <option value="resolved">Resolved</option>
+          <option value="dismissed">Dismissed</option>
+        </select>
+        <select id="fq-kind">
+          <option value="">All types</option>
+          <option value="duplicate_cross">Duplicate — two dealers</option>
+          <option value="duplicate_multi">Duplicate — 3+ dealers</option>
+          <option value="imei_lock">IMEI lock / mismatch</option>
+          <option value="no_serial_return">Return with no IMEI</option>
+        </select>
+        <input id="fq-owner" type="text" placeholder="Filter by owner" autocomplete="off">
+        <button id="fq-clear" class="ghost">Clear</button>
+      </div>
+      <div id="queue-stats" class="statbar"></div>
+      <div id="queue-list" class="cards"></div>
+      <div class="loadmore"><button id="q-more">Load more</button></div>
+    </section>
+
+    <!-- OVERVIEW -->
+    <section id="overview" class="view">
+      <div id="ov-cards" class="grid"></div>
+      <div class="panel">
+        <h3>Dispatch vs COD share by month</h3>
+        <p class="hint">Rising COD means more units leave the warehouse before payment is confirmed.</p>
+        <div id="ov-cod" class="chart"></div>
+      </div>
+      <div class="panel">
+        <h3>Top models by volume</h3>
+        <div id="ov-fam" class="chart"></div>
+      </div>
+      <div class="panel">
+        <h3>Dealers with duplicate serials</h3>
+        <div id="ov-dup" class="chart"></div>
+      </div>
+    </section>
+
+    <!-- DUPLICATES -->
+    <section id="duplicates" class="view">
+      <div class="filters">
+        <select id="dup-kind">
+          <option value="cross">Two or more dealers</option>
+          <option value="multi">Three or more dealers</option>
+          <option value="same">Same dealer twice</option>
+        </select>
+        <input id="dup-dealer" type="text" placeholder="Filter by dealer" autocomplete="off">
+      </div>
+      <div id="dup-list" class="cards"></div>
+      <div class="loadmore"><button id="d-more">Load more</button></div>
+    </section>
+
+    <!-- DEALERS -->
+    <section id="dealers" class="view">
+      <div class="filters">
+        <input id="dl-search" type="text" placeholder="Search dealer name or alias" autocomplete="off">
+      </div>
+      <div id="dealer-list" class="cards"></div>
+    </section>
+
+    <!-- RISK -->
+    <section id="risk" class="view">
+      <div class="panel">
+        <h3>Model risk ranking</h3>
+        <p class="hint">Combines duplicate rate with IMEI-lock returns. High lock count on one model usually means a supplier batch issue.</p>
+        <div id="risk-list" class="chart"></div>
+      </div>
+    </section>
+
+    <!-- OWNERSHIP -->
+    <section id="ownership" class="view">
+      <div id="own-cards" class="grid"></div>
+      <div class="panel">
+        <h3>Finding types</h3>
+        <div id="own-kinds" class="chart"></div>
+      </div>
+      <div class="panel">
+        <h3>How this works</h3>
+        <p class="hint">
+          Each finding is a reporting item, not an accusation. Assign an owner and a status so it
+          is clear who is responsible for closing it and what stage it is at.
+        </p>
+        <ul class="steps">
+          <li><b>Open</b> — not yet looked at</li>
+          <li><b>Investigating</b> — someone is checking it</li>
+          <li><b>Resolved</b> — action taken, note recorded</li>
+          <li><b>Dismissed</b> — checked, not an issue</li>
+        </ul>
+      </div>
+    </section>
+  </main>
+
+  <!-- DETAIL SHEET -->
+  <div id="sheet" class="sheet">
+    <div class="sheet-inner">
+      <div class="sheet-head">
+        <h2 id="sh-title">Detail</h2>
+        <button id="sh-close" class="ghost">Close</button>
+      </div>
+      <div id="sh-body" class="sheet-body"></div>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+</div>
+<script src="core.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+node_modules/
+release/
+*.db
+*.db-wal
+*.db-shm
+android/build/
+android/app/build/
+android/.gradle/
+android/local.properties
+android/.kotlin/
+*.log
+*.err
+.DS_Store
+Thumbs.db
+
+# Business data is confidential — keep it out of version control.
+# data/README.md is tracked so the expected file names are documented.
+data/*
+!data/README.md
