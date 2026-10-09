@@ -308,7 +308,40 @@ app.get('/api/inspect/:serial', (req, res) => {
   let diagnosis = null;
   if (dispatches.length > 1) {
     diagnosis = R.diagnoseDuplicate(dispatches, book);
-    diagnosis.nextActions = diagnosis.nextActions;
+  } else if (returns.length) {
+    // no duplicate, but the unit came back — reason about the return itself
+    const r = returns[0];
+    const lock = /lock/i.test(r.reason);
+    const diff = /different/i.test(r.reason);
+    diagnosis = {
+      family: dispatches[0] ? dispatches[0].family : r.family,
+      diagnosis: lock
+        ? 'The unit came back locked. Either a previous owner account is still attached (FRP), an operator network lock is active, or the mainboard was replaced and written with the wrong serial.'
+        : diff
+        ? 'The serial on the unit does not match the paperwork, so it cannot be matched to an invoice and must not re-enter stock.'
+        : `The unit came back with "${r.reason}". It is not a duplicate serial, so this is a product fault rather than a custody problem.`,
+      confidence: lock || diff ? 'high' : 'medium',
+      evidence: [
+        { label:'Dispatch trail', detail:`Only ${dispatches.length} dispatch record — the serial is not duplicated.`, weight:'good' },
+        { label:'Check digit', detail: l === true ? 'Valid, so not a clone or corruption.' : 'Not a 15-digit IMEI, so not applicable.', weight:'good' },
+        { label:'Logged reason', detail:r.reason, weight:'bad' },
+        { label:'Consequence', detail:'Cannot be sold as new until resolved.', weight:'bad' }
+      ],
+      nextActions: lock ? [
+        'Dial *#06# and compare with the box and the invoice — all three must match.',
+        'If it asks for a previous account, only the original owner can release it. Do not attempt a repair.',
+        'If one model dominates this list, raise a batch claim with the supplier.'
+      ] : diff ? [
+        'Photograph the unit and the box label side by side.',
+        'Segregate permanently as bad-bin.',
+        'Raise a warranty claim rather than writing the unit off.'
+      ] : [
+        'Raise a warranty claim with the supplier against this serial.',
+        'Check whether other units from the same batch show the same fault.',
+        'Restock only after repair is confirmed, never straight back into sellable stock.'
+      ],
+      valueAtRisk: r.price || 0
+    };
   }
 
   // which other serials shared the same dealers as this one (blast radius)
