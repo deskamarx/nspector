@@ -100,7 +100,10 @@ npm run rebuild:electron   # for npm run dev / npm run dist
 
 ### Android
 
+Needs `ANDROID_HOME` pointing at the Android SDK and a JDK on PATH:
+
 ```
+set ANDROID_HOME=%LOCALAPPDATA%\Android\Sdk
 android\build-apk.bat
 ```
 
@@ -182,10 +185,19 @@ packaged app.
 
 ### Android build note
 
-Gradle fails with `The filename, directory name, or volume label syntax is
-incorrect` on deeply-nested Windows paths. `build-apk.bat` stages the project
-into `C:\nscbuild` before building, then copies the APK back. Building
-directly inside a long path will fail.
+The SDK location comes from the `ANDROID_HOME` environment variable. This
+project deliberately does **not** use `android/local.properties` — on some
+Windows and AGP combinations a perfectly valid `sdk.dir` there makes dependency
+resolution fail with the misleading error:
+
+```
+Could not determine the dependencies of task ':app:compileDebugJavaWithJavac'.
+> java.io.IOException: The filename, directory name, or volume label syntax is incorrect
+```
+
+It reads like a path-length problem but is not; the build succeeds in deeply
+nested folders once `local.properties` is gone. `build-apk.bat` deletes it
+automatically if it finds one.
 
 ---
 
