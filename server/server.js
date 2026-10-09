@@ -194,24 +194,41 @@ app.get('/api/findings', (req, res) => {
   const status = (req.query.status || '').toString().trim();
   const kind = (req.query.kind || '').toString().trim();
   const owner = (req.query.owner || '').toString().trim();
+  const severity = (req.query.severity || '').toString().trim();
+  const minValue = parseFloat(req.query.minValue || '0') || 0;
   let sql = 'SELECT * FROM findings WHERE 1=1';
   const p = [];
   if (status) { sql += ' AND status=?'; p.push(status); }
   if (kind) { sql += ' AND kind=?'; p.push(kind); }
   if (owner) { sql += ' AND owner=?'; p.push(owner); }
-  sql += ` ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1
-            WHEN 'medium' THEN 2 ELSE 3 END, updated_at DESC`;
-  const rows = db.prepare(sql).all(...p);
+  if (severity) { sql += ' AND severity=?'; p.push(severity); }
+  if (minValue) { sql += ' AND value_at_risk >= ?'; p.push(minValue); }
+  sql += ` ORDER BY score DESC,
+             CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1
+             WHEN 'medium' THEN 2 ELSE 3 END, updated_at DESC`;
+  const rows = db.prepare(sql).all(...p).map(withEvidence);
   const counts = one(`SELECT
       SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) open,
       SUM(CASE WHEN status='investigating' THEN 1 ELSE 0 END) investigating,
       SUM(CASE WHEN status='resolved' THEN 1 ELSE 0 END) resolved,
       SUM(CASE WHEN status='dismissed' THEN 1 ELSE 0 END) dismissed,
-      COUNT(*) total FROM findings`);
+      COUNT(*) total,
+      ROUND(SUM(CASE WHEN status='open' THEN value_at_risk ELSE 0 END)) open_value
+    FROM findings`);
   const byOwner = q(`SELECT owner, status, COUNT(*) n FROM findings
     GROUP BY owner, status ORDER BY n DESC`);
   res.json({ rows, counts, byOwner });
 });
+
+/** attach parsed evidence to a finding row */
+function withEvidence(f) {
+  if (!f) return f;
+  let ev = [], acts = [];
+  try { ev = JSON.parse(f.evidence || '[]'); } catch (e) {}
+  try { acts = JSON.parse(f.next_actions || '[]'); } catch (e) {}
+  if (!acts.length && f.next_action) acts = [f.next_action];
+  return Object.assign({}, f, { evidence: ev, next_actions: acts });
+}
 
 app.patch('/api/findings/:id', (req, res) => {
   const id = parseInt(req.params.id, 10);
@@ -236,13 +253,77 @@ app.get('/api/ownership', (req, res) => {
       SUM(CASE WHEN status='investigating' THEN 1 ELSE 0 END) investigating,
       SUM(CASE WHEN status='resolved' THEN 1 ELSE 0 END) resolved,
       SUM(CASE WHEN status='dismissed' THEN 1 ELSE 0 END) dismissed,
-      SUM(CASE WHEN status='open' THEN amount ELSE 0 END) open_amount
+      ROUND(SUM(CASE WHEN status='open' THEN value_at_risk ELSE 0 END)) open_amount
     FROM findings GROUP BY owner ORDER BY total DESC`);
-  const unassigned = one(`SELECT COUNT(*) c, COALESCE(SUM(amount),0) amt
+  const unassigned = one(`SELECT COUNT(*) c, ROUND(SUM(value_at_risk)) amt
     FROM findings WHERE owner='' OR owner IS NULL`);
-  const byKind = q(`SELECT kind, severity, COUNT(*) n, COALESCE(SUM(amount),0) amt
+  const byKind = q(`SELECT kind, severity, COUNT(*) n, ROUND(SUM(value_at_risk)) amt
     FROM findings GROUP BY kind, severity ORDER BY n DESC`);
   res.json({ people, unassigned, byKind });
+});
+
+/** exposure portfolio — what it would cost to close everything */
+app.get('/api/portfolio', (req, res) => {
+  const s = dbm.stats(db);
+  const bySeverity = q(`SELECT severity, COUNT(*) n, ROUND(SUM(value_at_risk)) value
+    FROM findings GROUP BY severity`);
+  const topValue = q(`SELECT serial, family, dealer, ROUND(value_at_risk) value, diagnosis, score
+    FROM findings WHERE value_at_risk > 0 ORDER BY value_at_risk DESC LIMIT 20`);
+  const byDiagnosis = q(`SELECT diagnosis, COUNT(*) n, ROUND(SUM(value_at_risk)) value
+    FROM findings WHERE diagnosis IS NOT NULL GROUP BY diagnosis ORDER BY n DESC`);
+  const book = require('./reason').buildPriceBook(db);
+  const priceBook = [...book.entries()]
+    .map(([family, v]) => ({ family, typical:v.typical, min:v.min, max:v.max, samples:v.samples }))
+    .sort((a, b) => b.samples - a.samples);
+  const exposure = one(`SELECT ROUND(SUM(value_at_risk)) total,
+      ROUND(SUM(CASE WHEN status='open' THEN value_at_risk ELSE 0 END)) open_total,
+      SUM(CASE WHEN value_at_risk > 0 AND status='open' THEN 1 ELSE 0 END) priced_items
+    FROM findings`);
+  res.json({ stats:s, bySeverity, topValue, byDiagnosis, priceBook, exposure });
+});
+
+/** repeated dealer-to-dealer flows — treat as one issue, not N duplicates */
+app.get('/api/chains', (req, res) => {
+  const rows = db.prepare('SELECT * FROM chains ORDER BY count DESC').all()
+    .map(c => Object.assign({}, c, { sample: JSON.parse(c.sample || '[]') }));
+  res.json({ rows });
+});
+
+/** full reasoning dossier for one serial */
+app.get('/api/inspect/:serial', (req, res) => {
+  const R = require('./reason');
+  const serial = req.params.serial.trim();
+  const dispatches = q(`SELECT * FROM dispatches WHERE serial=? ORDER BY dt, id`, serial);
+  const returns = q(`SELECT * FROM returns WHERE serial=?`, serial);
+  const findings = db.prepare('SELECT * FROM findings WHERE serial=?').all(serial).map(withEvidence);
+
+  const book = R.buildPriceBook(db);
+  const l = R.luhn(serial);
+  const t = R.tac(serial);
+  const tacFamilies = t
+    ? q(`SELECT family, COUNT(DISTINCT serial) n FROM dispatches
+        WHERE SUBSTR(serial,1,8)=? GROUP BY family ORDER BY n DESC`, t)
+    : [];
+
+  let diagnosis = null;
+  if (dispatches.length > 1) {
+    diagnosis = R.diagnoseDuplicate(dispatches, book);
+    diagnosis.nextActions = diagnosis.nextActions;
+  }
+
+  // which other serials shared the same dealers as this one (blast radius)
+  const related = dispatches.length
+    ? q(`SELECT COUNT(*) n FROM dispatches WHERE party_key IN
+        (SELECT party_key FROM dispatches WHERE serial=?) AND serial<>?`,
+        serial, serial)[0].n
+    : 0;
+
+  res.json({
+    serial, serialKind: R.serialKind(serial), luhn: l, tac: t, tacFamilies,
+    dispatches, returns, findings, diagnosis,
+    price: book.get(dispatches[0] ? dispatches[0].family : '') || null,
+    relatedCount: related
+  });
 });
 
 app.post('/api/sync', async (req, res) => {

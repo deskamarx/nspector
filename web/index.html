@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#0b0f14">
-<title>NSpector — Device Inventory</title>
+<meta name="theme-color" content="#0a0e13">
+<title>NSpector — Device Inventory Intelligence</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
@@ -17,37 +17,54 @@
         <small id="syncstate">connecting…</small>
       </div>
     </div>
-    <button id="syncbtn" class="ghost" title="Pull latest data">Sync</button>
+    <div class="topright">
+      <div class="exposure" id="top-exposure" title="Open value exposure">
+        <span class="ex-label">Open exposure</span>
+        <span class="ex-val" id="top-exposure-val">—</span>
+      </div>
+      <button id="syncbtn" class="ghost" title="Re-ingest source data">Sync</button>
+    </div>
   </header>
 
   <nav id="tabs">
     <button data-tab="queue" class="active">Work Queue</button>
-    <button data-tab="overview">Overview</button>
-    <button data-tab="duplicates">Duplicates</button>
+    <button data-tab="inspect">Inspector</button>
+    <button data-tab="exposure">Exposure</button>
+    <button data-tab="chains">Flows</button>
     <button data-tab="dealers">Dealers</button>
-    <button data-tab="risk">Risk</button>
     <button data-tab="ownership">Ownership</button>
   </nav>
 
   <main>
-    <!-- WORK QUEUE -->
+    <!-- ============ WORK QUEUE ============ -->
     <section id="queue" class="view active">
       <div class="filters">
         <select id="fq-status">
-          <option value="">All statuses</option>
+          <option value="">Any status</option>
           <option value="open">Open</option>
           <option value="investigating">Investigating</option>
           <option value="resolved">Resolved</option>
           <option value="dismissed">Dismissed</option>
         </select>
+        <select id="fq-sev">
+          <option value="">Any severity</option>
+          <option value="critical">Critical</option>
+          <option value="high">High</option>
+          <option value="medium">Medium</option>
+          <option value="low">Low</option>
+        </select>
         <select id="fq-kind">
-          <option value="">All types</option>
+          <option value="">Any finding</option>
           <option value="duplicate_cross">Duplicate — two dealers</option>
-          <option value="duplicate_multi">Duplicate — 3+ dealers</option>
-          <option value="imei_lock">IMEI lock / mismatch</option>
-          <option value="no_serial_return">Return with no IMEI</option>
+          <option value="duplicate_multi">Duplicate — three or more</option>
+          <option value="orphan_return">Returned, never dispatched</option>
+          <option value="imei_lock">IMEI lock or mismatch</option>
+          <option value="no_serial_return">Return with no serial</option>
+          <option value="luhn_invalid">Fails check digit</option>
+          <option value="tac_conflict">Prefix / model conflict</option>
         </select>
         <input id="fq-owner" type="text" placeholder="Filter by owner" autocomplete="off">
+        <input id="fq-min" type="number" placeholder="Min value" min="0" step="5000" autocomplete="off">
         <button id="fq-clear" class="ghost">Clear</button>
       </div>
       <div id="queue-stats" class="statbar"></div>
@@ -55,39 +72,64 @@
       <div class="loadmore"><button id="q-more">Load more</button></div>
     </section>
 
-    <!-- OVERVIEW -->
-    <section id="overview" class="view">
-      <div id="ov-cards" class="grid"></div>
+    <!-- ============ INSPECTOR ============ -->
+    <section id="inspect" class="view">
       <div class="panel">
-        <h3>Dispatch vs COD share by month</h3>
-        <p class="hint">Rising COD means more units leave the warehouse before payment is confirmed.</p>
-        <div id="ov-cod" class="chart"></div>
+        <h3>Serial inspector</h3>
+        <p class="hint">Enter a 15-digit IMEI or any serial to get its full trail, the reasoning
+          behind any finding, and the evidence behind it.</p>
+        <div class="searchbar">
+          <input id="ins-q" type="text" placeholder="864616088906357" autocomplete="off" spellcheck="false">
+          <button id="ins-go" class="primary">Inspect</button>
+        </div>
+        <div class="quicktry">
+          <span>try:</span>
+          <button class="chipbtn" data-s="864616088906357">a duplicate</button>
+          <button class="chipbtn" data-s="868436082481166">an IMEI lock</button>
+          <button class="chipbtn" data-s="359764211948607">three dealers</button>
+        </div>
+      </div>
+      <div id="ins-out"></div>
+    </section>
+
+    <!-- ============ EXPOSURE ============ -->
+    <section id="exposure" class="view">
+      <div id="exp-cards" class="grid"></div>
+      <div class="panel">
+        <h3>Where the exposure sits</h3>
+        <p class="hint">Value is taken from prices actually observed on your own return records —
+          nothing here is an estimate.</p>
+        <div id="exp-sev" class="chart"></div>
       </div>
       <div class="panel">
-        <h3>Top models by volume</h3>
-        <div id="ov-fam" class="chart"></div>
+        <h3>Root cause — diagnosed</h3>
+        <p class="hint">What the evidence actually points to, across every finding.</p>
+        <div id="exp-diag" class="chart"></div>
       </div>
       <div class="panel">
-        <h3>Dealers with duplicate serials</h3>
-        <div id="ov-dup" class="chart"></div>
+        <h3>Highest value items</h3>
+        <div id="exp-top" class="cards"></div>
+      </div>
+      <div class="panel">
+        <h3>Price book</h3>
+        <p class="hint">Built from your logged returns. Families with no observed price are shown
+          as unpriced rather than assumed to be zero.</p>
+        <div id="exp-book" class="chart"></div>
       </div>
     </section>
 
-    <!-- DUPLICATES -->
-    <section id="duplicates" class="view">
-      <div class="filters">
-        <select id="dup-kind">
-          <option value="cross">Two or more dealers</option>
-          <option value="multi">Three or more dealers</option>
-          <option value="same">Same dealer twice</option>
-        </select>
-        <input id="dup-dealer" type="text" placeholder="Filter by dealer" autocomplete="off">
+    <!-- ============ FLOWS / CHAINS ============ -->
+    <section id="chains" class="view">
+      <div class="panel">
+        <h3>Repeated dealer-to-dealer flows</h3>
+        <p class="hint">The same serials passing through the same pair of dealers, over and over.
+          That is not random noise — treat each of these as one structural issue, not N separate
+          duplicates.</p>
+        <div id="chain-list" class="cards"></div>
       </div>
-      <div id="dup-list" class="cards"></div>
-      <div class="loadmore"><button id="d-more">Load more</button></div>
     </section>
 
-    <!-- DEALERS -->
+    <!-- ============ DEALERS ============ -->
     <section id="dealers" class="view">
       <div class="filters">
         <input id="dl-search" type="text" placeholder="Search dealer name or alias" autocomplete="off">
@@ -95,16 +137,7 @@
       <div id="dealer-list" class="cards"></div>
     </section>
 
-    <!-- RISK -->
-    <section id="risk" class="view">
-      <div class="panel">
-        <h3>Model risk ranking</h3>
-        <p class="hint">Combines duplicate rate with IMEI-lock returns. High lock count on one model usually means a supplier batch issue.</p>
-        <div id="risk-list" class="chart"></div>
-      </div>
-    </section>
-
-    <!-- OWNERSHIP -->
+    <!-- ============ OWNERSHIP ============ -->
     <section id="ownership" class="view">
       <div id="own-cards" class="grid"></div>
       <div class="panel">
@@ -112,26 +145,26 @@
         <div id="own-kinds" class="chart"></div>
       </div>
       <div class="panel">
-        <h3>How this works</h3>
+        <h3>How this is meant to be used</h3>
         <p class="hint">
-          Each finding is a reporting item, not an accusation. Assign an owner and a status so it
-          is clear who is responsible for closing it and what stage it is at.
+          Each finding is a reporting item, not an accusation. A duplicate is almost always an
+          unclosed return, not theft. What matters is that somebody is accountable for closing it.
         </p>
         <ul class="steps">
-          <li><b>Open</b> — not yet looked at</li>
-          <li><b>Investigating</b> — someone is checking it</li>
-          <li><b>Resolved</b> — action taken, note recorded</li>
-          <li><b>Dismissed</b> — checked, not an issue</li>
+          <li><b>Open</b> — generated, nobody has looked at it</li>
+          <li><b>Investigating</b> — someone is checking it against the physical unit</li>
+          <li><b>Resolved</b> — action taken, note recorded against the finding</li>
+          <li><b>Dismissed</b> — checked and explained, no action needed</li>
         </ul>
       </div>
     </section>
   </main>
 
-  <!-- DETAIL SHEET -->
+  <!-- ============ FINDING SHEET ============ -->
   <div id="sheet" class="sheet">
     <div class="sheet-inner">
       <div class="sheet-head">
-        <h2 id="sh-title">Detail</h2>
+        <h2 id="sh-title">Finding</h2>
         <button id="sh-close" class="ghost">Close</button>
       </div>
       <div id="sh-body" class="sheet-body"></div>

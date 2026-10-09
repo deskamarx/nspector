@@ -47,14 +47,24 @@ CREATE INDEX IF NOT EXISTS ix_r_reason ON returns(reason);
 
 CREATE TABLE IF NOT EXISTS findings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  kind TEXT NOT NULL,          -- duplicate_cross | duplicate_multi | imei_lock | no_serial_return | unmatched_payment
-  severity TEXT NOT NULL,      -- critical | high | medium | low
+  kind TEXT NOT NULL,          -- duplicate_cross | duplicate_multi | imei_lock | no_serial_return | orphan_return | tac_conflict | luhn_invalid
+  severity TEXT NOT NULL,      -- critical | high | medium | low  (computed)
+  score INTEGER DEFAULT 0,
   title TEXT NOT NULL,
   detail TEXT,
+  diagnosis TEXT,
+  confidence TEXT,
+  next_action TEXT,
+  evidence TEXT,               -- JSON array of {label,detail,weight}
   serial TEXT,
   family TEXT,
   dealer TEXT,
+  dealer_count INTEGER DEFAULT 0,
+  gap_days INTEGER,
+  cross_wing INTEGER DEFAULT 0,
+  luhn INTEGER,
   amount REAL,
+  value_at_risk REAL DEFAULT 0,
   owner TEXT DEFAULT '',
   status TEXT DEFAULT 'open',  -- open | investigating | resolved | dismissed
   resolution TEXT DEFAULT '',
@@ -63,6 +73,8 @@ CREATE TABLE IF NOT EXISTS findings (
 );
 CREATE INDEX IF NOT EXISTS ix_f_kind ON findings(kind);
 CREATE INDEX IF NOT EXISTS ix_f_status ON findings(status);
+CREATE INDEX IF NOT EXISTS ix_f_sev ON findings(severity, score);
+CREATE INDEX IF NOT EXISTS ix_f_owner ON findings(owner);
 
 CREATE TABLE IF NOT EXISTS dealers (
   party_key TEXT PRIMARY KEY,
@@ -98,7 +110,28 @@ function open(file) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const db = new Database(file);
   db.exec(SCHEMA);
+  migrate(db);
   return db;
+}
+
+/** Additive migrations. Existing databases gain new columns without losing
+ *  the owner / status / resolution work already recorded against findings. */
+function migrate(db) {
+  const cols = (t) => db.prepare(`PRAGMA table_info(${t})`).all().map(c => c.name);
+  const want = {
+    findings: {
+      score:'INTEGER DEFAULT 0', diagnosis:'TEXT', confidence:'TEXT', next_action:'TEXT',
+      evidence:'TEXT', next_actions:'TEXT', dealer_count:'INTEGER DEFAULT 0', gap_days:'INTEGER',
+      cross_wing:'INTEGER DEFAULT 0', luhn:'INTEGER', value_at_risk:'REAL DEFAULT 0',
+      value_basis:'TEXT'
+    }
+  };
+  for (const [table, adds] of Object.entries(want)) {
+    const have = new Set(cols(table));
+    for (const [name, type] of Object.entries(adds)) {
+      if (!have.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+    }
+  }
 }
 
 /** Load every CSV/JSON source into the database. Returns counts. */
@@ -219,70 +252,228 @@ function rebuildDealers(db) {
   tx();
 }
 
-/** Regenerate findings from current data. Preserves owner/status for existing keys. */
+/** Regenerate findings from current data, with a reasoned diagnosis attached.
+ *  Preserves owner / status / resolution for anything that survives regeneration. */
 function rebuildFindings(db) {
   const now = new Date().toISOString();
+  const R = require('./reason');
+  const book = R.buildPriceBook(db);
+  const priced = new Set([...book.keys()]);
+
   const existing = new Map();
   for (const f of db.prepare('SELECT * FROM findings').all())
     existing.set(f.kind + '|' + (f.serial || f.dealer || f.detail || ''), f);
 
   const out = [];
-  const push = (kind, severity, title, detail, serial, family, dealer, amount) => {
-    const key = kind + '|' + (serial || dealer || detail || '');
+
+  function push(f) {
+    const key = f.kind + '|' + (f.serial || f.dealer || f.detail || '');
     const prev = existing.get(key);
-    out.push({ kind, severity, title, detail, serial: serial||null, family: family||null,
-      dealer: dealer||null, amount: amount||null,
+    const scored = R.scoreFinding(f);
+    out.push({
+      kind: f.kind, title: f.title, detail: f.detail || null,
+      diagnosis: f.diagnosis || null, confidence: f.confidence || null,
+      evidence: JSON.stringify(f.evidence || []),
+      next_action: (f.nextActions && f.nextActions[0]) || null,
+      next_actions: JSON.stringify(f.nextActions || []),
+      score: scored.score, severity: scored.band,
+      serial: f.serial || null, family: f.family || null, dealer: f.dealer || null,
+      dealer_count: f.dealerCount || null,
+      gap_days: (f.gapDays === undefined || f.gapDays === null) ? null : f.gapDays,
+      cross_wing: f.crossWing ? 1 : 0,
+      luhn: (f.luhn === undefined || f.luhn === null) ? null : (f.luhn ? 1 : 0),
+      amount: f.amount || null, value_at_risk: f.valueAtRisk || 0,
+      value_basis: (f.family && priced.has(f.family))
+        ? 'median of logged returns for ' + f.family
+        : (f.valueAtRisk ? 'from the return record' : 'no observed price for this model — exposure is real but unpriced'),
       owner: prev ? prev.owner : '', status: prev ? prev.status : 'open',
       resolution: prev ? prev.resolution : '',
-      created_at: prev ? prev.created_at : now, updated_at: now });
-  };
-
-  // cross-dealer duplicate serials
-  const cross = db.prepare(`
-    SELECT serial, COUNT(DISTINCT party_key) AS n, GROUP_CONCAT(DISTINCT party) AS parties,
-           MIN(sku) AS sku, MIN(family) AS family
-    FROM dispatches GROUP BY serial HAVING n > 1`).all();
-  for (const r of cross) {
-    const ev = r.parties.split(',').slice(0, 6).join(' | ');
-    push('duplicate_cross', 'critical',
-      `Serial in ${r.n} dealers`,
-      `${r.sku} — dispatched to: ${ev}`,
-      r.serial, r.family, r.parties.split(',')[0], null);
+      created_at: prev ? prev.created_at : now, updated_at: now
+    });
   }
 
-  // three-way or worse
-  const multi = cross.filter(r => r.n >= 3);
-  for (const r of multi) {
-    push('duplicate_multi', 'critical',
-      `Serial in ${r.n} dealers (worst case)`,
-      `${r.sku} — ${r.parties.split(',').join(' | ')}`,
-      r.serial, r.family, r.parties.split(',')[0], null);
+  // ---------- duplicate serials, diagnosed ----------
+  const dup = db.prepare(`
+    SELECT serial, COUNT(*) rows_n, COUNT(DISTINCT party_key) dealers,
+           MIN(sku) sku, MIN(family) family
+    FROM dispatches GROUP BY serial HAVING dealers > 1
+    ORDER BY dealers DESC, rows_n DESC`).all();
+
+  const dupRecs = db.prepare(`SELECT serial, party, wing, date, dt, family, sku
+    FROM dispatches ORDER BY dt, id`).all();
+  const bySerial = new Map();
+  for (const r of dupRecs) {
+    if (!bySerial.has(r.serial)) bySerial.set(r.serial, []);
+    bySerial.get(r.serial).push(r);
   }
 
-  // IMEI problems on returns
-  const imeiRet = db.prepare(`SELECT * FROM returns WHERE kind='IMEI'`).all();
-  for (const r of imeiRet) {
-    push('imei_lock', 'high',
-      `IMEI ${/lock/i.test(r.reason) ? 'lock' : 'mismatch'}: ${r.model}`,
-      `${r.merchant} — ${r.reason} — Tk ${Math.round(r.price||0).toLocaleString()}`,
-      r.serial, r.family, r.merchant, r.price);
+  const chainInput = [];
+  for (const r of dup) {
+    const recs = bySerial.get(r.serial) || [];
+    const diag = R.diagnoseDuplicate(recs.map(x => ({
+      serial: r.serial, party: x.party, wing: x.wing, date: x.date, dt: x.dt,
+      family: x.family, sku: x.sku
+    })), book);
+    const crossWing = new Set(recs.map(x => (x.wing || '').trim())).size > 1;
+    const kind = diag.dealers.length >= 3 ? 'duplicate_multi' : 'duplicate_cross';
+    chainInput.push({ serial: r.serial, stops: recs.map(x => ({ party: x.party })), value: diag.valueAtRisk });
+
+    push({
+      kind,
+      title: diag.dealers.length >= 3
+        ? `Serial recorded across ${diag.dealers.length} dealers`
+        : 'Serial recorded against two dealers',
+      detail: `${diag.family} — ${diag.flow.map(f => `${f.date} ${f.party}`).join('  →  ')}`,
+      diagnosis: diag.diagnosis,
+      confidence: R.confidenceFor(diag, diag.evidence),
+      evidence: diag.evidence,
+      nextActions: diag.nextActions,
+      serial: r.serial, family: diag.family, dealer: diag.dealers[0],
+      dealerCount: diag.dealers.length, gapDays: diag.gapDays,
+      crossWing, luhn: diag.luhn, valueAtRisk: diag.valueAtRisk
+    });
   }
 
-  // returns with no serial — untraceable
-  const noSer = db.prepare(`SELECT * FROM returns WHERE serial IS NULL OR serial=''`).all();
-  for (const r of noSer) {
-    push('no_serial_return', 'high',
-      `Return with no IMEI — untraceable`,
-      `${r.merchant} — ${r.model} — Tk ${Math.round(r.price||0).toLocaleString()} — ${r.reason}`,
-      null, r.family, r.merchant, r.price);
+  // ---------- returns with no serial ----------
+  for (const r of db.prepare(`SELECT * FROM returns WHERE serial IS NULL OR serial=''`).all()) {
+    push({
+      kind: 'no_serial_return',
+      title: 'Return with no serial — cannot be located',
+      detail: `${r.merchant} — ${r.model} — Tk ${Math.round(r.price || 0).toLocaleString()} — ${r.reason}`,
+      diagnosis: 'A unit was returned but no serial was recorded, so there is no way to prove which handset it was or whether it re-entered stock.',
+      confidence: 'high',
+      evidence: [
+        { label: 'Serial', detail: 'The serial field is empty on the return record.', weight: 'bad' },
+        { label: 'Value', detail: 'Tk ' + Math.round(r.price || 0).toLocaleString() + ' of stock cannot be traced.', weight: 'bad' }
+      ],
+      nextActions: [
+        'Ask the dealer which unit was returned — model and colour usually narrow it to one or two.',
+        'Search dispatch records for that model to shortlist candidate serials.',
+        'Adopt a written rule: no serial, no return accepted.'
+      ],
+      family: r.family, dealer: r.merchant, amount: r.price, valueAtRisk: r.price || 0
+    });
+  }
+
+  // ---------- returns we have no dispatch record for ----------
+  for (const r of db.prepare(`
+    SELECT r.* FROM returns r LEFT JOIN dispatches d ON d.serial = r.serial
+    WHERE r.serial <> '' AND d.id IS NULL`).all()) {
+    push({
+      kind: 'orphan_return',
+      title: 'Returned a unit we never dispatched',
+      detail: `${r.merchant} — ${r.model} — Tk ${Math.round(r.price || 0).toLocaleString()} — ${r.reason}`,
+      diagnosis: 'A handset came back that does not appear anywhere in the dispatch ledger. Either it shipped before this ledger period, from the other warehouse, or the serial on the paperwork is wrong.',
+      confidence: 'medium',
+      evidence: [
+        { label: 'Serial', detail: r.serial + ' — not found in any dispatch record.', weight: 'bad' },
+        { label: 'Possible causes', detail: 'Outside the ledger period, wrong warehouse, or a transcription error.', weight: 'warn' }
+      ],
+      nextActions: [
+        'Search the previous period and the other warehouse before treating this as a loss.',
+        'Confirm the serial against the physical unit — it may simply be mistyped.',
+        'If it cannot be placed, it is dead stock that will never sell.'
+      ],
+      serial: r.serial, family: r.family, dealer: r.merchant, amount: r.price, valueAtRisk: r.price || 0
+    });
+  }
+
+  // ---------- IMEI problems ----------
+  for (const r of db.prepare(`SELECT * FROM returns WHERE kind='IMEI'`).all()) {
+    const lock = /lock/i.test(r.reason);
+    push({
+      kind: 'imei_lock',
+      title: (lock ? 'IMEI locked: ' : 'IMEI does not match invoice: ') + (r.family || r.model),
+      detail: `${r.merchant} — ${r.reason} — Tk ${Math.round(r.price || 0).toLocaleString()}`,
+      diagnosis: lock
+        ? 'The unit returned locked. Either a previous owner account is still attached (FRP), an operator network lock is active, or the mainboard was replaced and written with the wrong serial.'
+        : 'The serial on the unit differs from the one on the paperwork, so it cannot be matched to an invoice and must not re-enter stock.',
+      confidence: 'high',
+      evidence: [
+        { label: 'Logged reason', detail: r.reason, weight: 'bad' },
+        { label: 'Consequence', detail: 'The unit cannot be sold as new until the serial is resolved.', weight: 'bad' },
+        { label: 'Check for a pattern', detail: 'Counted alongside other IMEI issues on this model — if one model dominates it is a batch problem.', weight: 'warn' }
+      ],
+      nextActions: lock ? [
+        'Dial *#06# on the unit and compare with the box and the invoice — all three must match.',
+        'If it asks for a previous account, only the original owner can release it. Do not attempt a repair.',
+        'Group by model: if one model dominates, raise a batch claim with the supplier.'
+      ] : [
+        'Photograph the unit and the box label side by side.',
+        'Segregate permanently as bad-bin. A mismatched serial must never re-enter sellable stock.',
+        'Raise a warranty claim with the supplier rather than writing the unit off.'
+      ],
+      serial: r.serial, family: r.family, dealer: r.merchant, amount: r.price, valueAtRisk: r.price || 0
+    });
+  }
+
+  // ---------- serials failing their check digit ----------
+  for (const r of db.prepare(`SELECT DISTINCT serial, family FROM dispatches WHERE LENGTH(serial)=15`).all()) {
+    if (R.luhn(r.serial) !== false) continue;
+    push({
+      kind: 'luhn_invalid',
+      title: 'Serial fails its check digit',
+      detail: `${r.family} — ${r.serial}`,
+      diagnosis: 'The serial is not a valid IMEI. Either it was mistyped on entry, or it is a cloned serial from an unofficial device.',
+      confidence: 'high',
+      evidence: [{ label: 'Check digit', detail: 'Fails the standard Luhn validation every IMEI must pass.', weight: 'bad' }],
+      nextActions: [
+        'Compare against the box label and correct the record if mistyped.',
+        'If it matches the box, the unit is a clone — do not sell it and report the supplier.'
+      ],
+      serial: r.serial, family: r.family
+    });
+  }
+
+  // ---------- one serial prefix recorded against several models ----------
+  const tacRows = db.prepare(`SELECT SUBSTR(serial,1,8) t, family, COUNT(DISTINCT serial) n
+    FROM dispatches WHERE LENGTH(serial)=15 GROUP BY t, family`).all();
+  const tacMap = new Map();
+  for (const r of tacRows) {
+    if (!tacMap.has(r.t)) tacMap.set(r.t, new Map());
+    tacMap.get(r.t).set(r.family, r.n);
+  }
+  for (const [t, fams] of tacMap) {
+    if (fams.size < 2) continue;
+    push({
+      kind: 'tac_conflict',
+      title: `Serial prefix ${t} recorded against ${fams.size} models`,
+      detail: [...fams.keys()].join(' | '),
+      diagnosis: 'One Type Allocation Code — which identifies a single model — is recorded against several different models. Either the catalogue mapping is wrong or serials were entered against the wrong product.',
+      confidence: fams.size >= 4 ? 'high' : 'low',
+      evidence: [
+        { label: 'Prefix', detail: t + ' maps to a single model by industry standard.', weight: 'warn' },
+        { label: 'Models seen', detail: [...fams.entries()].map(([k, v]) => `${k} (${v})`).join(', '), weight: 'warn' }
+      ],
+      nextActions: [
+        'Confirm the model held by each dealer against the physical unit.',
+        'Correct the SKU mapping so future dispatches land in the right family.'
+      ],
+      family: [...fams.keys()][0]
+    });
   }
 
   db.prepare('DELETE FROM findings').run();
   const ins = db.prepare(`INSERT INTO findings
-    (kind,severity,title,detail,serial,family,dealer,amount,owner,status,resolution,created_at,updated_at)
-    VALUES (@kind,@severity,@title,@detail,@serial,@family,@dealer,@amount,@owner,@status,@resolution,@created_at,@updated_at)`);
+    (kind,severity,score,title,detail,diagnosis,confidence,next_action,evidence,next_actions,
+     serial,family,dealer,dealer_count,gap_days,cross_wing,luhn,amount,value_at_risk,value_basis,
+     owner,status,resolution,created_at,updated_at)
+    VALUES (@kind,@severity,@score,@title,@detail,@diagnosis,@confidence,@next_action,@evidence,@next_actions,
+     @serial,@family,@dealer,@dealer_count,@gap_days,@cross_wing,@luhn,@amount,@value_at_risk,@value_basis,
+     @owner,@status,@resolution,@created_at,@updated_at)`);
   const tx = db.transaction(list => { for (const f of list) ins.run(f); });
   tx(out);
+
+  // ---------- dealer-to-dealer flows ----------
+  db.exec(`CREATE TABLE IF NOT EXISTS chains (
+    pair TEXT PRIMARY KEY, from_party TEXT, to_party TEXT,
+    count INTEGER, value REAL, sample TEXT, verdict TEXT)`);
+  db.prepare('DELETE FROM chains').run();
+  const ci = db.prepare(`INSERT INTO chains (pair,from_party,to_party,count,value,sample,verdict)
+    VALUES (?,?,?,?,?,?,?)`);
+  for (const c of R.buildChains(chainInput))
+    ci.run(c.from + ' -> ' + c.to, c.from, c.to, c.count, c.value, JSON.stringify(c.sample), c.verdict);
+
   return out.length;
 }
 
