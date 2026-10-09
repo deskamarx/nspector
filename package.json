@@ -6,10 +6,12 @@
   "scripts": {
     "start": "node server/server.js",
     "server": "node server/server.js",
-    "dev": "electron .",
-    "dist": "electron-builder --win --x64",
-    "dist:all": "electron-builder --win --x64 --linux --mac",
-    "apk": "cd android && ./gradlew assembleDebug"
+    "dev": "npm run rebuild:electron && electron .",
+    "dist": "npm run rebuild:electron && electron-builder --win --x64",
+    "dist:all": "npm run rebuild:electron && electron-builder --win --x64 --linux --mac",
+    "apk": "android\\build-apk.bat",
+    "rebuild:node": "npm rebuild better-sqlite3",
+    "rebuild:electron": "electron-rebuild -f -w better-sqlite3"
   },
   "author": "NSpector",
   "license": "MIT",

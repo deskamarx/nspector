@@ -61,17 +61,42 @@ naming problem rather than a collection problem.
 
 ## Running it
 
-### Windows
+### Desktop app (Windows)
 
 ```
 npm install
-npm run dev          # run from source
+npm run dev          # rebuild native module for Electron, then run
 npm run dist         # build installer + portable exe
 ```
 
 Installers land in `release/`:
 - `NSpector Setup 1.0.0.exe` — normal installer
 - `NSpector 1.0.0.exe` — portable, no install
+
+The packaged app needs no Node installed — it carries its own runtime.
+
+### Server only
+
+```
+npm install
+npm run rebuild:node   # native module for plain Node
+npm start              # http://localhost:4173
+```
+
+For a machine that just stays on so phones can reach it.
+
+### Native module ABI
+
+`better-sqlite3` compiles against a specific Node ABI, and Electron bundles its
+own Node. They are not interchangeable, so switch with:
+
+```
+npm run rebuild:node       # for npm start
+npm run rebuild:electron   # for npm run dev / npm run dist
+```
+
+`npm run dev` and `npm run dist` do the Electron rebuild for you. If
+`npm start` ever fails with `NODE_MODULE_VERSION`, run `npm run rebuild:node`.
 
 ### Android
 
@@ -83,14 +108,6 @@ Produces `android/NSpector.apk`. Install it on the phone, then enter the
 server address shown in the desktop app under **Help → Server address**.
 
 Both devices must be on the same network.
-
-### Server only
-
-```
-npm start            # http://localhost:4173
-```
-
-Useful if you want the phone to reach a machine that stays on.
 
 ---
 
