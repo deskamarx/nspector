@@ -17,3 +17,5 @@ Thumbs.db
 # data/README.md is tracked so the expected file names are documented.
 data/*
 !data/README.md
+# build artifact, produced by android\build-apk.bat
+android/*.apk
