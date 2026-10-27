@@ -206,7 +206,11 @@ app.get('/api/findings', (req, res) => {
   sql += ` ORDER BY score DESC,
              CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1
              WHEN 'medium' THEN 2 ELSE 3 END, updated_at DESC`;
-  const rows = db.prepare(sql).all(...p).map(withEvidence);
+  const limit = Math.min(Math.max(parseInt(req.query.limit || '0', 10) || 0, 0), 2000);
+  const offset = Math.max(parseInt(req.query.offset || '0', 10) || 0, 0);
+  const params = limit ? [...p, limit, offset] : p;
+  if (limit) sql += ' LIMIT ? OFFSET ?';
+  const rows = db.prepare(sql).all(...params).map(withEvidence);
   const counts = one(`SELECT
       SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) open,
       SUM(CASE WHEN status='investigating' THEN 1 ELSE 0 END) investigating,
@@ -229,6 +233,15 @@ function withEvidence(f) {
   if (!acts.length && f.next_action) acts = [f.next_action];
   return Object.assign({}, f, { evidence: ev, next_actions: acts });
 }
+
+/** one finding, by id — used by the detail sheet so it never has to page the queue */
+app.get('/api/findings/:id', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'bad id' });
+  const row = one('SELECT * FROM findings WHERE id=?', id);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  res.json({ finding: withEvidence(row) });
+});
 
 app.patch('/api/findings/:id', (req, res) => {
   const id = parseInt(req.params.id, 10);

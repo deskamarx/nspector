@@ -125,8 +125,9 @@
   });
 
   async function openFinding(id){
-    const d = await api('/api/findings?limit=1000');
-    const f = d.rows.find(x => x.id === id);
+    let f;
+    try { f = (await api('/api/findings/' + id)).finding; }
+    catch (e) { toast('Finding not found'); return; }
     if (!f) { toast('Finding not found'); return; }
 
     let trail = '';
@@ -422,7 +423,7 @@
   }
 
   // ------------------------------------------------ wiring
-  const LOADERS = { queue:loadQueue, inspect:()=>{}, exposure:loadExposure,
+  const LOADERS = { queue:()=>loadQueue(true), inspect:()=>{}, exposure:loadExposure,
                     chains:loadChains, dealers:loadDealers, ownership:loadOwnership };
   $$('#tabs button').forEach(b => b.addEventListener('click', ()=>{
     $$('#tabs button').forEach(x=>x.classList.remove('active'));
