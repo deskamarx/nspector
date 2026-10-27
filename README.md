@@ -169,6 +169,12 @@ Replace the files and press **Sync**.
 Public Google Sheets are fetched directly. Private ones must be exported to CSV
 first — the app will not attempt to authenticate as you.
 
+### Backing up the data
+
+`data/` is excluded from version control, so keep a copy of it somewhere else.
+Run `backup-data.bat` to write a timestamped zip to `..\data-backups\` — outside
+the repository, and outside anything a fresh clone or a `git clean` would touch.
+
 ---
 
 ## API
