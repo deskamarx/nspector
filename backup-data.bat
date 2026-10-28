@@ -6,8 +6,12 @@ REM never means a lost dataset. Safe to run any time; it only reads data\.
 setlocal
 cd /d "%~dp0"
 
-if not exist "data\" (
-  echo No data folder found next to this script.
+set "DATA_SRC=data"
+if not exist "%DATA_SRC%\s4_imei_master.csv" (
+  if exist "..\data\s4_imei_master.csv" set "DATA_SRC=..\data"
+)
+if not exist "%DATA_SRC%\" (
+  echo No data folder found next to this script or in ..\data.
   exit /b 1
 )
 
@@ -16,7 +20,7 @@ if not exist "..\data-backups\" mkdir "..\data-backups"
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd-HHmmss"') do set "STAMP=%%i"
 set "OUT=..\data-backups\nspector-data-%STAMP%.zip"
 
-tar -a -c -f "%OUT%" -C "data" .
+tar -a -c -f "%OUT%" -C "%DATA_SRC%" .
 if errorlevel 1 (
   echo Backup failed.
   exit /b 1

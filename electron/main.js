@@ -17,6 +17,7 @@ function seedDataDir() {
   // dev: ./data next to the app. packaged: unpacked into resources/data.
   const candidates = [
     path.join(__dirname, '..', 'data'),
+    path.join(__dirname, '..', '..', 'data'),
     path.join(process.resourcesPath || '', 'data')
   ];
   let copied = 0;

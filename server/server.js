@@ -15,7 +15,20 @@ const core = require('./core');
 const PORT = process.env.PORT || 4173;
 const ROOT = path.join(__dirname, '..');
 const WEB = path.join(ROOT, 'web');
-const DATA = process.env.NSPECTOR_DATA || path.join(ROOT, 'data');
+function resolveDataDir() {
+  if (process.env.NSPECTOR_DATA) return process.env.NSPECTOR_DATA;
+  const primary = path.join(ROOT, 'data');
+  const parent = path.join(ROOT, '..', 'data');
+  const hasData = dir => {
+    try {
+      return fs.existsSync(dir) && fs.readdirSync(dir).some(f => /\.(csv|txt|json)$/i.test(f));
+    } catch (e) { return false; }
+  };
+  if (hasData(primary)) return primary;
+  if (hasData(parent)) return parent;
+  return primary;
+}
+const DATA = resolveDataDir();
 const DBFILE = process.env.NSPECTOR_DB || path.join(ROOT, 'nspector.db');
 
 const db = dbm.open(DBFILE);
