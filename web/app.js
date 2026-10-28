@@ -24,9 +24,15 @@
     tac_conflict:'prefix conflict'
   };
   const STATUS = ['open','investigating','resolved','dismissed'];
+  const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
-  function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');
-    clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),2600);}
+  function toast(m, type){
+    const t = $('#toast');
+    t.textContent = m;
+    t.className = 'show' + (type ? ' ' + type : '');
+    clearTimeout(t._t);
+    t._t = setTimeout(() => { t.className = ''; }, 2600);
+  }
   async function api(p,o){const r=await fetch(API+p,o);if(!r.ok)throw new Error(r.statusText);return r.json();}
   const val = f => f.value_at_risk > 0
     ? `<span class="tag val">${money(f.value_at_risk)}</span>`
@@ -42,18 +48,20 @@
     ws.onerror = () => { try { ws.close(); } catch(e){} };
     ws.onmessage = e => {
       let d; try { d = JSON.parse(e.data); } catch(x){ return; }
-      if (d.type === 'synced') { toast('Synced · ' + short(d.stats.dispatches) + ' records'); refreshAll(); }
+      if (d.type === 'synced') { toast('Synced · ' + short(d.stats.dispatches) + ' records', 'ok'); refreshAll(); }
       else if (d.type === 'finding_updated') {
         const t = currentTab();
+        if (t === 'overview') loadOverview();
         if (t === 'queue') loadQueue(true);
         if (t === 'ownership') loadOwnership();
         if (t === 'exposure') loadExposure();
+        loadTopExposure();
       }
     };
   }
   function retryConnect(){ retry = Math.min(retry+1,6); setTimeout(connect, 500*Math.pow(2,retry)); }
   function syncState(cls,txt){const el=$('#syncstate');el.textContent=txt;el.className=cls;}
-  function currentTab(){ const b=$('#tabs button.active'); return b ? b.dataset.tab : 'queue'; }
+  function currentTab(){ const b=$('#tabs button.active'); return b ? b.dataset.tab : 'overview'; }
 
   // ------------------------------------------------ work queue
   function fCard(f){
@@ -91,7 +99,7 @@
     if(ow)p.set('owner',ow); if(mv)p.set('minValue',mv);
     let d;
     try { d = await api('/api/findings?' + p); }
-    catch(e){ toast('Could not load the queue'); return; }
+    catch(e){ toast('Could not load the queue', 'err'); return; }
     const c = d.counts || {};
     $('#queue-stats').innerHTML = `
       <span class="pill crit">Open <b>${short(c.open||0)}</b></span>
@@ -100,8 +108,13 @@
       <span class="pill">Dismissed <b>${short(c.dismissed||0)}</b></span>
       <span class="pill">Total <b>${short(c.total||0)}</b></span>
       <span class="pill crit">Open value <b>${tb(c.open_value||0)}</b></span>`;
+    const b = $('#badge-queue');
+    if (b) {
+      b.textContent = short(c.open || 0);
+      b.style.display = (c.open > 0) ? 'inline-flex' : 'none';
+    }
     const rows = d.rows || [];
-    const html = rows.map(fCard).join('');
+    const html = rows.length ? rows.map(fCard).join('') : '<div class="empty"><span class="empty-icon">✓</span><strong>No findings match your filters</strong><span class="text-dim">Try clearing or adjusting filter criteria</span></div>';
     if (reset) $('#queue-list').innerHTML = html;
     else $('#queue-list').insertAdjacentHTML('beforeend', html);
     $('#q-more').style.display = rows.length < queueLimit ? 'none' : 'block';
@@ -422,15 +435,241 @@
       <span class="num">${short(x.n)}${x.amt?' · '+tb(x.amt):''}</span></div>`).join('');
   }
 
+  // ------------------------------------------------ overview
+  async function loadOverview(){
+    let d;
+    try { d = await api('/api/overview'); }
+    catch(e){ toast('Could not load overview', 'err'); return; }
+    const st = d.stats || {};
+
+    $('#ov-grid').innerHTML = [
+      ['Dispatches', short(st.dispatches), 'total dispatch lines logged', 'acc'],
+      ['Unique serials', short(st.uniqueSerials), 'physical units in ledger', ''],
+      ['Active dealers', short(st.dealers), 'dealers & distributors', ''],
+      ['Collections', tb(st.depositValue), 'total deposits recorded', 'ok'],
+      ['Cross duplicates', short(st.crossDup), 'serials at 2+ dealers', 'crit'],
+      ['Returns logged', short(st.returns), tb(st.returnValue) + ' value observed', 'high']
+    ].map(([k,v,s,c])=>`<div class="stat ${c}"><div class="k">${k}</div>
+      <div class="v">${v}</div><div class="s">${s}</div></div>`).join('');
+
+    const disp = d.dispatch || [];
+    if (disp.length) {
+      const mx = Math.max(1, ...disp.map(x => x.units || 0));
+      $('#ov-dispatch-chart').innerHTML = disp.map(x => {
+        const pct = Math.max(8, Math.round((x.units / mx) * 100));
+        const isPeak = x.units === mx;
+        const p = (x.ym || '').split('-');
+        const lbl = p.length === 2 ? `${MONTHS_SHORT[+p[1]-1] || p[1]} '${p[0].slice(2)}` : x.ym;
+        return `<div class="trend-bar-wrap" title="${esc(x.ym)}: ${short(x.units)} units dispatched">
+          <div class="trend-bar-col${isPeak ? ' high-month' : ''}" style="height:${pct}%"></div>
+          <span class="trend-label">${esc(lbl)}</span>
+        </div>`;
+      }).join('');
+    } else {
+      $('#ov-dispatch-chart').innerHTML = '<p class="hint">No dispatch history recorded.</p>';
+    }
+
+    const cod = d.cod || [];
+    if (cod.length) {
+      const codPcts = cod.map(x => x.amt > 0 ? (x.cod_amt / x.amt * 100) : 0);
+      const mxCod = Math.max(1, ...codPcts);
+      $('#ov-cod-chart').innerHTML = cod.map((x, i) => {
+        const rate = codPcts[i];
+        const pct = Math.max(8, Math.round((rate / mxCod) * 100));
+        const p = (x.ym || '').split('-');
+        const lbl = p.length === 2 ? `${MONTHS_SHORT[+p[1]-1] || p[1]} '${p[0].slice(2)}` : x.ym;
+        return `<div class="trend-bar-wrap" title="${esc(x.ym)}: ${rate.toFixed(1)}% COD (${tb(x.cod_amt)} of ${tb(x.amt)})">
+          <div class="trend-bar-col" style="height:${pct}%;background:rgba(255,159,67,0.7)"></div>
+          <span class="trend-label">${esc(lbl)}</span>
+        </div>`;
+      }).join('');
+    } else {
+      $('#ov-cod-chart').innerHTML = '<p class="hint">No deposit history recorded.</p>';
+    }
+
+    const dupTop = d.dupTop || [];
+    $('#ov-dup-total').textContent = short(dupTop.length) + ' dealers';
+    if (dupTop.length) {
+      const mxDup = Math.max(1, ...dupTop.slice(0, 10).map(x => x.cross_dup || 0));
+      $('#ov-dup-chart').innerHTML = dupTop.slice(0, 10).map(x => `
+        <div class="bar" style="cursor:pointer" title="Click to filter by ${esc(x.name)}" data-dealer="${esc(x.name)}">
+          <span class="lab" title="${esc(x.name)}">${esc(x.name)}</span>
+          <span class="track"><span class="fill crit" style="width:${(x.cross_dup/mxDup*100).toFixed(1)}%"></span></span>
+          <span class="num">${short(x.cross_dup)} dups</span>
+        </div>`).join('');
+      $$('#ov-dup-chart .bar').forEach(b => b.addEventListener('click', () => {
+        const name = b.dataset.dealer;
+        const tb = $(`#tabs button[data-tab="dealers"]`);
+        if (tb) tb.click();
+        $('#dl-search').value = name;
+        loadDealers();
+      }));
+    } else {
+      $('#ov-dup-chart').innerHTML = '<p class="hint">No duplicate dealers detected.</p>';
+    }
+
+    const cls = d.classes || [];
+    if (cls.length) {
+      const mxCls = Math.max(1, ...cls.map(x => x.units || 0));
+      const totCls = cls.reduce((a, b) => a + (b.units || 0), 0) || 1;
+      $('#ov-class-chart').innerHTML = cls.map(x => `
+        <div class="bar">
+          <span class="lab">${esc(x.cls || 'OTHER')}</span>
+          <span class="track"><span class="fill acc" style="width:${(x.units/mxCls*100).toFixed(1)}%"></span></span>
+          <span class="num">${short(x.units)} (${(x.units/totCls*100).toFixed(0)}%)</span>
+        </div>`).join('');
+    } else {
+      $('#ov-class-chart').innerHTML = '<p class="hint">No product classes found.</p>';
+    }
+
+    const fams = (d.dispatchByFamily || []).slice(0, 12);
+    if (fams.length) {
+      const mxFam = Math.max(1, ...fams.map(x => x.units || 0));
+      $('#ov-model-chart').innerHTML = fams.map(x => `
+        <div class="bar">
+          <span class="lab" title="${esc(x.family)}">${esc(x.family)}</span>
+          <span class="track"><span class="fill low" style="width:${(x.units/mxFam*100).toFixed(1)}%"></span></span>
+          <span class="num">${short(x.units)}</span>
+        </div>`).join('');
+    } else {
+      $('#ov-model-chart').innerHTML = '<p class="hint">No model dispatches recorded.</p>';
+    }
+  }
+
+  // ------------------------------------------------ risk ranking
+  async function loadRisk(){
+    const tbody = $('#risk-tbody');
+    tbody.innerHTML = '<tr><td colspan="7" class="loading-state"><span class="spinner"></span></td></tr>';
+    let d;
+    try { d = await api('/api/risk'); }
+    catch(e){ tbody.innerHTML = '<tr><td colspan="7" class="empty">Could not load risk rankings</td></tr>'; return; }
+    const rows = d.rows || [];
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="empty">No models with sufficient volume (&ge;5 units)</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.map(r => `
+      <tr>
+        <td><b>${esc(r.family)}</b></td>
+        <td class="tabular">${short(r.units)}</td>
+        <td class="tabular ${r.crossDup ? 'text-crit' : 'text-dim'}"><b>${short(r.crossDup)}</b></td>
+        <td class="tabular">${r.dupRate.toFixed(1)}%</td>
+        <td class="tabular ${r.imeiLock ? 'text-high' : 'text-dim'}"><b>${short(r.imeiLock)}</b></td>
+        <td class="tabular">${r.lockRate.toFixed(1)}%</td>
+        <td class="tabular">
+          <span class="tag risk-score ${r.risk >= 20 ? 'crit' : r.risk >= 10 ? 'high' : r.risk >= 5 ? 'med' : 'low'}">
+            ${r.risk.toFixed(1)}
+          </span>
+        </td>
+      </tr>
+    `).join('');
+  }
+
+  // ------------------------------------------------ csv export
+  function downloadCsv(filename, headers, rows){
+    const escCsv = v => {
+      if (v == null) return '""';
+      const s = String(v).replace(/"/g, '""');
+      return `"${s}"`;
+    };
+    const content = [
+      headers.map(escCsv).join(','),
+      ...rows.map(r => r.map(escCsv).join(','))
+    ].join('\r\n');
+    const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  async function exportQueue(){
+    const btn = $('#export-queue');
+    const orig = btn.textContent;
+    btn.textContent = 'Exporting…'; btn.disabled = true;
+    try {
+      const p = new URLSearchParams({ limit: 2000, offset: 0 });
+      const st=$('#fq-status').value, sv=$('#fq-sev').value, kd=$('#fq-kind').value;
+      const ow=$('#fq-owner').value.trim(), mv=$('#fq-min').value;
+      if(st)p.set('status',st); if(sv)p.set('severity',sv); if(kd)p.set('kind',kd);
+      if(ow)p.set('owner',ow); if(mv)p.set('minValue',mv);
+      const d = await api('/api/findings?' + p);
+      const rows = d.rows || [];
+      const headers = [
+        'ID', 'Title', 'Severity', 'Score', 'Type', 'Status',
+        'Serial', 'Model', 'Dealer', 'Dealers Count', 'Gap (Days)',
+        'Value At Risk (Tk)', 'Value Basis', 'Owner', 'Diagnosis', 'Detail', 'Resolution', 'Updated At'
+      ];
+      const data = rows.map(f => [
+        f.id, f.title, f.severity, f.score, KIND[f.kind] || f.kind, f.status,
+        f.serial || '', f.family || '', f.dealer || '', f.dealer_count || '',
+        f.gap_days !== null && f.gap_days !== undefined ? f.gap_days : '',
+        f.value_at_risk || 0, f.value_basis || '', f.owner || '',
+        f.diagnosis || '', f.detail || '', f.resolution || '', f.updated_at || ''
+      ]);
+      const date = new Date().toISOString().slice(0, 10);
+      downloadCsv(`nspector-findings-${date}.csv`, headers, data);
+      toast(`Exported ${rows.length} findings to CSV`, 'ok');
+    } catch(e) {
+      toast('Export failed', 'err');
+    } finally {
+      btn.textContent = orig; btn.disabled = false;
+    }
+  }
+
+  async function exportDealers(){
+    const btn = $('#export-dealers');
+    const orig = btn.textContent;
+    btn.textContent = 'Exporting…'; btn.disabled = true;
+    try {
+      const s = $('#dl-search').value.trim();
+      const d = await api('/api/dealers?limit=2000' + (s ? '&q=' + encodeURIComponent(s) : ''));
+      const rows = d.rows || [];
+      const headers = [
+        'Dealer Name', 'Aliases', 'Units Dispatched', 'Serials Handled',
+        'Cross Duplicates', 'Dup Rate (%)', 'Total Paid / Deposited (Tk)', 'First Seen', 'Last Seen'
+      ];
+      const data = rows.map(x => {
+        const al = JSON.parse(x.aliases || '[]');
+        const rate = x.serials ? (x.cross_dup / x.serials * 100).toFixed(1) : '0.0';
+        return [
+          x.name, al.join('; '), x.units, x.serials,
+          x.cross_dup, rate, x.paid || 0, x.first || '', x.last || ''
+        ];
+      });
+      const date = new Date().toISOString().slice(0, 10);
+      downloadCsv(`nspector-dealers-${date}.csv`, headers, data);
+      toast(`Exported ${rows.length} dealers to CSV`, 'ok');
+    } catch(e) {
+      toast('Export failed', 'err');
+    } finally {
+      btn.textContent = orig; btn.disabled = false;
+    }
+  }
+
   // ------------------------------------------------ wiring
-  const LOADERS = { queue:()=>loadQueue(true), inspect:()=>{}, exposure:loadExposure,
-                    chains:loadChains, dealers:loadDealers, ownership:loadOwnership };
+  const LOADERS = {
+    overview: loadOverview,
+    queue: () => loadQueue(true),
+    inspect: () => {},
+    exposure: loadExposure,
+    chains: loadChains,
+    dealers: loadDealers,
+    ownership: loadOwnership,
+    risk: loadRisk
+  };
+
   $$('#tabs button').forEach(b => b.addEventListener('click', ()=>{
     $$('#tabs button').forEach(x=>x.classList.remove('active'));
     $$('.view').forEach(v=>v.classList.remove('active'));
     b.classList.add('active');
-    $('#'+b.dataset.tab).classList.add('active');
-    LOADERS[b.dataset.tab]();
+    const sec = $('#' + b.dataset.tab);
+    if (sec) sec.classList.add('active');
+    if (LOADERS[b.dataset.tab]) LOADERS[b.dataset.tab]();
   }));
 
   ['#fq-status','#fq-sev','#fq-kind'].forEach(s=>$(s).addEventListener('change',()=>loadQueue(true)));
@@ -440,23 +679,30 @@
   $('#fq-min').addEventListener('input', ()=>debounce(()=>loadQueue(true)));
   $('#fq-clear').addEventListener('click', ()=>{
     ['#fq-status','#fq-sev','#fq-kind','#fq-owner','#fq-min'].forEach(s=>$(s).value='');
-    loadQueue(true); });
+    loadQueue(true);
+  });
   $('#q-more').addEventListener('click', ()=>{ queueOffset+=queueLimit; loadQueue(); });
   $('#dl-search').addEventListener('input', ()=>debounce(loadDealers));
+  $('#export-queue').addEventListener('click', exportQueue);
+  $('#export-dealers').addEventListener('click', exportDealers);
+  $('#risk-refresh').addEventListener('click', () => { toast('Refreshing risk ranking…'); loadRisk(); });
 
   $('#syncbtn').addEventListener('click', async ()=>{
     const b=$('#syncbtn'); b.textContent='Syncing…'; b.disabled=true;
     try{ await api('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
-      toast('Sync complete'); refreshAll(); }
-    catch(e){ toast('Sync failed'); }
+      toast('Sync complete', 'ok'); refreshAll(); }
+    catch(e){ toast('Sync failed', 'err'); }
     b.textContent='Sync'; b.disabled=false;
   });
 
   function refreshAll(){
     const t = currentTab();
-    (LOADERS[t]||loadQueue)();
+    (LOADERS[t] || loadOverview)();
     loadTopExposure();
   }
 
-  connect(); loadQueue(true); loadTopExposure();
+  connect();
+  loadOverview();
+  loadQueue(true);
+  loadTopExposure();
 })();

@@ -76,12 +76,14 @@ problem, and the largest accounts would be the ones wrongly accused.
 
 | Screen | |
 |---|---|
-| **Work Queue** | Every finding with diagnosis, confidence, score, value. Filter by status, severity, type, owner, minimum value. |
+| **Overview** | Portfolio snapshot KPIs, monthly dispatch trends, Cash-on-Delivery share, top duplicate dealers, and product class breakdown. |
+| **Work Queue** | Every finding with diagnosis, confidence, score, value. Filter by status, severity, type, owner, minimum value. Export filtered results to CSV. |
 | **Inspector** | Any serial → chain of custody, reasoning, evidence, action list |
 | **Exposure** | Where the value sits, by severity and by root cause |
 | **Flows** | Repeated dealer-to-dealer movements, grouped as one issue |
-| **Dealers** | Duplicate rate as a percentage of each dealer's own stock |
+| **Dealers** | Duplicate rate as a percentage of each dealer's own stock. Export dealer directory to CSV. |
 | **Ownership** | Who owes a resolution |
+| **Risk** | Model risk ranking by duplicate rate, IMEI locks, and composite risk score. |
 
 ---
 
